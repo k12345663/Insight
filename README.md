@@ -49,6 +49,10 @@ pip install streamlit pandas numpy plotly scikit-learn google-generativeai openp
 ```bash
 streamlit run app.py
 ```
+*Note: If `streamlit` is not recognized, try running it as a Python module:*
+```bash
+python -m streamlit run app.py
+```
 The application will launch on `http://localhost:8501` (or next available port).
 
 ---
