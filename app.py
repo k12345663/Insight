@@ -12,6 +12,16 @@ from plotly.subplots import make_subplots
 import sys
 import os
 
+# Deep Insights Engine
+try:
+    from engine.deep_insights import generate_deep_insights, format_parameter_insights, generate_parameter_report
+    DEEP_INSIGHTS_AVAILABLE = True
+except ImportError:
+    DEEP_INSIGHTS_AVAILABLE = False
+    def generate_deep_insights(*args, **kwargs): return []
+    def format_parameter_insights(*args, **kwargs): return []
+    def generate_parameter_report(*args, **kwargs): return {}
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 os.environ['GEMINI_API_KEY'] = 'AIzaSyD_EKoU7PvqlUClpmwPYNenaaS6rXymhRI'
@@ -240,15 +250,19 @@ def render_insights(df, is_dark):
             fig.update_layout(title=dict(text=f'📊 Top {cat_cols[0]}'))
             st.plotly_chart(fig, use_container_width=True)
             
-            # Explanation
-            top_val = agg[num_cols[0]].max()
-            top_name = agg[agg[num_cols[0]] == top_val][cat_cols[0]].values[0]
-            diff = ((agg[num_cols[0]].max() - agg[num_cols[0]].min()) / agg[num_cols[0]].min() * 100)
-            chart_explanation([
-                f"Horizontal bar ranking showing {cat_cols[0]} by total {num_cols[0]}",
-                f"**{top_name}** leads with {top_val:,.0f} - {diff:.0f}% higher than lowest performer",
-                f"Color gradient (purple→pink) indicates relative performance strength"
-            ], is_dark)
+            # Deep Insights
+            if DEEP_INSIGHTS_AVAILABLE:
+                insights = generate_deep_insights(df, 'bar', category=cat_cols[0], value=num_cols[0])
+                chart_explanation(insights, is_dark)
+            else:
+                top_val = agg[num_cols[0]].max()
+                top_name = agg[agg[num_cols[0]] == top_val][cat_cols[0]].values[0]
+                diff = ((agg[num_cols[0]].max() - agg[num_cols[0]].min()) / agg[num_cols[0]].min() * 100)
+                chart_explanation([
+                    f"Horizontal bar ranking showing {cat_cols[0]} by total {num_cols[0]}",
+                    f"**{top_name}** leads with {top_val:,.0f} - {diff:.0f}% higher than lowest performer",
+                    f"Color gradient (purple→pink) indicates relative performance strength"
+                ], is_dark)
     
     with c2:
         if len(num_cols) >= 2:
@@ -261,15 +275,70 @@ def render_insights(df, is_dark):
             fig.update_layout(title=dict(text='🔗 Correlations'))
             st.plotly_chart(fig, use_container_width=True)
             
-            # Find strongest correlation
-            mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
-            max_corr = corr.where(mask).abs().max().max()
-            chart_explanation([
-                f"Correlation matrix showing relationships between {len(num_cols)} numeric variables",
-                f"Blue = positive correlation, White = no correlation, Purple = negative",
-                f"Strongest relationship: r={max_corr:.2f} - use for predictive analysis"
-            ], is_dark)
-
+            # Deep Correlation Insights
+            if DEEP_INSIGHTS_AVAILABLE:
+                insights = generate_deep_insights(df, 'correlation', columns=num_cols)
+                chart_explanation(insights, is_dark)
+            else:
+                mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+                max_corr = corr.where(mask).abs().max().max()
+                chart_explanation([
+                    f"Correlation matrix showing relationships between {len(num_cols)} numeric variables",
+                    f"Blue = positive correlation, White = no correlation, Purple = negative",
+                    f"Strongest relationship: r={max_corr:.2f} - use for predictive analysis"
+                ], is_dark)
+    
+    # === PARAMETER-WISE ANALYSIS SECTION ===
+    st.markdown("---")
+    with st.expander("📋 **Parameter-wise Details** (click to expand)", expanded=False):
+        st.markdown("### Column-by-Column Analysis")
+        
+        if DEEP_INSIGHTS_AVAILABLE:
+            report = generate_parameter_report(df)
+            
+            # Select columns to view
+            selected_cols = st.multiselect(
+                "Select columns to analyze:",
+                options=df.columns.tolist(),
+                default=df.columns[:5].tolist() if len(df.columns) > 5 else df.columns.tolist()
+            )
+            
+            if selected_cols:
+                for col in selected_cols:
+                    if col in report:
+                        data = report[col]
+                        col_display = data.get('display_name', col)
+                        
+                        with st.container():
+                            st.markdown(f"#### {col_display}")
+                            
+                            if data.get('type') == 'numeric':
+                                # Numeric column stats
+                                c1, c2, c3, c4 = st.columns(4)
+                                c1.metric("Min", data.get('min', 'N/A'))
+                                c2.metric("Max", data.get('max', 'N/A'))
+                                c3.metric("Mean", data.get('mean', 'N/A'))
+                                c4.metric("Median", data.get('median', 'N/A'))
+                                
+                                # Percentiles
+                                pcts = data.get('percentiles', {})
+                                if pcts:
+                                    st.caption(f"Percentiles: 25th={pcts.get('25%')} | 50th={pcts.get('50%')} | 75th={pcts.get('75%')} | 90th={pcts.get('90%')}")
+                            else:
+                                # Categorical column stats
+                                top_vals = data.get('top_values', [])
+                                if top_vals:
+                                    top_str = ', '.join([f"{v['value']} ({v['percentage']}%)" for v in top_vals[:5]])
+                                    st.markdown(f"**Top values**: {top_str}")
+                                st.caption(f"Unique values: {data.get('unique_values', 'N/A')} | Missing: {data.get('null_count', 0)} ({data.get('null_pct', 0)}%)")
+                            
+                            # Column insights
+                            for insight in data.get('insights', []):
+                                st.info(insight)
+                            
+                            st.markdown("---")
+        else:
+            st.info("Parameter-wise analysis requires the deep insights module.")
 
 def render_dashboard(df, is_dark):
     layout = get_layout(is_dark)
@@ -282,12 +351,25 @@ def render_dashboard(df, is_dark):
     tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Distribution", "Comparison", "Heatmap"])
     
     with tab1:
-        # KPIs
+        # KPIs - Smart formatting based on column type
         cols = st.columns(4)
         for i, col in enumerate(num_cols[:4]):
             with cols[i]:
                 val = df[col].sum()
-                st.metric(col, f"{val/1000:.1f}K" if val >= 1000 else f"{val:.0f}")
+                col_lower = col.lower()
+                # Don't use K for year-like columns or small values
+                is_year_like = ('year' in col_lower or 'date' in col_lower or 
+                               'id' in col_lower or (1900 <= val/len(df) <= 2100))
+                is_aggregatable = any(x in col_lower for x in ['revenue', 'sales', 'amount', 'price', 'cost', 'profit', 'total'])
+                
+                if is_year_like:
+                    # Show average for years
+                    avg_val = df[col].mean()
+                    st.metric(col, f"{avg_val:.0f}")
+                elif is_aggregatable and val >= 10000:
+                    st.metric(col, f"{val/1000:,.1f}K" if val < 1_000_000 else f"{val/1_000_000:,.1f}M")
+                else:
+                    st.metric(col, f"{val:,.0f}")
         
         st.markdown("---")
         c1, c2 = st.columns(2)
@@ -304,13 +386,18 @@ def render_dashboard(df, is_dark):
                 fig.add_annotation(text=f"<b>{df[num_cols[0]].sum():,.0f}</b>", x=0.5, y=0.5, showarrow=False, font_size=16)
                 st.plotly_chart(fig, use_container_width=True)
                 
-                top = agg.nlargest(1, num_cols[0])[cat_cols[0]].values[0]
-                top_pct = agg.nlargest(1, num_cols[0])[num_cols[0]].values[0] / agg[num_cols[0]].sum() * 100
-                chart_explanation([
-                    f"Donut chart showing proportional share of {num_cols[0]} across {cat_cols[0]}",
-                    f"**{top}** holds the largest share at {top_pct:.1f}% of total",
-                    f"Central value shows aggregate: {df[num_cols[0]].sum():,.0f}"
-                ], is_dark)
+                # Deep Pie Chart Insights
+                if DEEP_INSIGHTS_AVAILABLE:
+                    insights = generate_deep_insights(df, 'pie', category=cat_cols[0], value=num_cols[0])
+                    chart_explanation(insights, is_dark)
+                else:
+                    top = agg.nlargest(1, num_cols[0])[cat_cols[0]].values[0]
+                    top_pct = agg.nlargest(1, num_cols[0])[num_cols[0]].values[0] / agg[num_cols[0]].sum() * 100
+                    chart_explanation([
+                        f"Donut chart showing proportional share of {num_cols[0]} across {cat_cols[0]}",
+                        f"**{top}** holds the largest share at {top_pct:.1f}% of total",
+                        f"Central value shows aggregate: {df[num_cols[0]].sum():,.0f}"
+                    ], is_dark)
         
         with c2:
             if cat_cols and num_cols:
@@ -340,12 +427,17 @@ def render_dashboard(df, is_dark):
                 fig.update_layout(title=dict(text=f'📊 {num_cols[0]} Distribution'))
                 st.plotly_chart(fig, use_container_width=True)
                 
-                skew = df[num_cols[0]].skew()
-                chart_explanation([
-                    f"Histogram showing frequency distribution of {num_cols[0]}",
-                    f"Data is {'right-skewed' if skew > 0.5 else 'left-skewed' if skew < -0.5 else 'normally distributed'} (skewness: {skew:.2f})",
-                    f"Mean: {df[num_cols[0]].mean():,.0f} | Median: {df[num_cols[0]].median():,.0f}"
-                ], is_dark)
+                # Deep Histogram Insights
+                if DEEP_INSIGHTS_AVAILABLE:
+                    insights = generate_deep_insights(df, 'histogram', column=num_cols[0])
+                    chart_explanation(insights, is_dark)
+                else:
+                    skew = df[num_cols[0]].skew()
+                    chart_explanation([
+                        f"Histogram showing frequency distribution of {num_cols[0]}",
+                        f"Data is {'right-skewed' if skew > 0.5 else 'left-skewed' if skew < -0.5 else 'normally distributed'} (skewness: {skew:.2f})",
+                        f"Mean: {df[num_cols[0]].mean():,.0f} | Median: {df[num_cols[0]].median():,.0f}"
+                    ], is_dark)
         
         with c2:
             if len(num_cols) >= 2:
@@ -360,13 +452,18 @@ def render_dashboard(df, is_dark):
                 fig.update_layout(title=dict(text=f'🎯 {num_cols[0]} vs {num_cols[1]}'))
                 st.plotly_chart(fig, use_container_width=True)
                 
-                q1 = len(df[(df[num_cols[0]] >= x_med) & (df[num_cols[1]] >= y_med)])
-                corr = df[num_cols[0]].corr(df[num_cols[1]])
-                chart_explanation([
-                    f"Scatter plot revealing relationship between {num_cols[0]} and {num_cols[1]}",
-                    f"Correlation coefficient: r={corr:.2f} ({'strong' if abs(corr)>0.7 else 'moderate' if abs(corr)>0.4 else 'weak'} relationship)",
-                    f"**{q1}** points ({q1/len(df)*100:.0f}%) are high performers in both metrics (top-right quadrant)"
-                ], is_dark)
+                # Deep Scatter Insights
+                if DEEP_INSIGHTS_AVAILABLE:
+                    insights = generate_deep_insights(df, 'scatter', x=num_cols[0], y=num_cols[1])
+                    chart_explanation(insights, is_dark)
+                else:
+                    q1 = len(df[(df[num_cols[0]] >= x_med) & (df[num_cols[1]] >= y_med)])
+                    corr = df[num_cols[0]].corr(df[num_cols[1]])
+                    chart_explanation([
+                        f"Scatter plot revealing relationship between {num_cols[0]} and {num_cols[1]}",
+                        f"Correlation coefficient: r={corr:.2f} ({'strong' if abs(corr)>0.7 else 'moderate' if abs(corr)>0.4 else 'weak'} relationship)",
+                        f"**{q1}** points ({q1/len(df)*100:.0f}%) are high performers in both metrics (top-right quadrant)"
+                    ], is_dark)
     
     with tab2:
         c1, c2, c3 = st.columns(3)
@@ -387,14 +484,19 @@ def render_dashboard(df, is_dark):
         fig.update_layout(title=dict(text=f'📈 {metric} Distribution'))
         st.plotly_chart(fig, use_container_width=True)
         
-        q1, q3 = df[metric].quantile(0.25), df[metric].quantile(0.75)
-        iqr = q3 - q1
-        outliers = len(df[(df[metric] < q1-1.5*iqr) | (df[metric] > q3+1.5*iqr)])
-        chart_explanation([
-            f"{'Violin' if chart=='Violin' else 'Box' if chart=='Box' else 'Histogram'} plot showing {metric} distribution{' by ' + group if group != 'None' else ''}",
-            f"IQR: {q1:,.0f} to {q3:,.0f} (middle 50% of data) | {outliers} potential outliers detected",
-            f"Median: {df[metric].median():,.1f} | Std Dev: {df[metric].std():,.1f}"
-        ], is_dark)
+        # Deep Distribution Insights
+        if DEEP_INSIGHTS_AVAILABLE:
+            insights = generate_deep_insights(df, 'histogram', column=metric)
+            chart_explanation(insights, is_dark)
+        else:
+            q1, q3 = df[metric].quantile(0.25), df[metric].quantile(0.75)
+            iqr = q3 - q1
+            outliers = len(df[(df[metric] < q1-1.5*iqr) | (df[metric] > q3+1.5*iqr)])
+            chart_explanation([
+                f"{'Violin' if chart=='Violin' else 'Box' if chart=='Box' else 'Histogram'} plot showing {metric} distribution{' by ' + group if group != 'None' else ''}",
+                f"IQR: {q1:,.0f} to {q3:,.0f} (middle 50% of data) | {outliers} potential outliers detected",
+                f"Median: {df[metric].median():,.1f} | Std Dev: {df[metric].std():,.1f}"
+            ], is_dark)
     
     with tab3:
         if cat_cols and num_cols:
@@ -413,14 +515,19 @@ def render_dashboard(df, is_dark):
             fig.update_layout(title=dict(text=f'📊 {metric} by {group}'))
             st.plotly_chart(fig, use_container_width=True)
             
-            top = agg.iloc[0][group]
-            top_total = agg.iloc[0]['sum']
-            top_avg = agg.iloc[0]['mean']
-            chart_explanation([
-                f"Dual-axis chart comparing total (bars) vs average (line) {metric} by {group}",
-                f"**{top}** leads with total {top_total:,.0f} and avg {top_avg:,.1f}",
-                f"Divergence between bar height and line indicates volume vs efficiency trade-offs"
-            ], is_dark)
+            # Deep Comparison Insights
+            if DEEP_INSIGHTS_AVAILABLE:
+                insights = generate_deep_insights(df, 'bar', category=group, value=metric)
+                chart_explanation(insights, is_dark)
+            else:
+                top = agg.iloc[0][group]
+                top_total = agg.iloc[0]['sum']
+                top_avg = agg.iloc[0]['mean']
+                chart_explanation([
+                    f"Dual-axis chart comparing total (bars) vs average (line) {metric} by {group}",
+                    f"**{top}** leads with total {top_total:,.0f} and avg {top_avg:,.1f}",
+                    f"Divergence between bar height and line indicates volume vs efficiency trade-offs"
+                ], is_dark)
     
     with tab4:
         if len(cat_cols) >= 2 and num_cols:
@@ -438,13 +545,18 @@ def render_dashboard(df, is_dark):
             fig.update_layout(title=dict(text=f'🔥 {val} Heatmap'))
             st.plotly_chart(fig, use_container_width=True)
             
-            max_val = pivot.values.max()
-            min_val = pivot.values.min()
-            chart_explanation([
-                f"Heatmap showing average {val} across {row} (rows) and {col} (columns)",
-                f"Color intensity: Dark purple = low ({min_val:,.0f}), Light purple = high ({max_val:,.0f})",
-                f"Identifies hotspots: which {row}/{col} combinations perform best or need attention"
-            ], is_dark)
+            # Deep Heatmap Insights
+            if DEEP_INSIGHTS_AVAILABLE:
+                insights = generate_deep_insights(df, 'heatmap', row=row, col=col, value=val)
+                chart_explanation(insights, is_dark)
+            else:
+                max_val = pivot.values.max()
+                min_val = pivot.values.min()
+                chart_explanation([
+                    f"Heatmap showing average {val} across {row} (rows) and {col} (columns)",
+                    f"Color intensity: Dark purple = low ({min_val:,.0f}), Light purple = high ({max_val:,.0f})",
+                    f"Identifies hotspots: which {row}/{col} combinations perform best or need attention"
+                ], is_dark)
             
         elif len(num_cols) >= 2:
             corr = df[num_cols].corr()
@@ -454,11 +566,16 @@ def render_dashboard(df, is_dark):
             fig.update_layout(title=dict(text='🔗 Correlation Heatmap'))
             st.plotly_chart(fig, use_container_width=True)
             
-            chart_explanation([
-                f"Correlation matrix for all {len(num_cols)} numeric features",
-                f"Red = positive correlation, Blue = negative correlation",
-                f"Use to identify multicollinearity or predictive relationships"
-            ], is_dark)
+            # Deep Correlation Insights for Heatmap
+            if DEEP_INSIGHTS_AVAILABLE:
+                insights = generate_deep_insights(df, 'correlation', columns=num_cols)
+                chart_explanation(insights, is_dark)
+            else:
+                chart_explanation([
+                    f"Correlation matrix for all {len(num_cols)} numeric features",
+                    f"Red = positive correlation, Blue = negative correlation",
+                    f"Use to identify multicollinearity or predictive relationships"
+                ], is_dark)
 
 
 def render_analysis(df, is_dark):
